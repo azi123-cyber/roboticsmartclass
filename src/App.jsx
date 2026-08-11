@@ -28,6 +28,10 @@ const icons = {
   logout:   ["M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4", "M16 17l5-5-5-5", "M21 12H9"],
 };
 
+const requiresEmailVerification = (firebaseUser) =>
+  !firebaseUser.emailVerified &&
+  firebaseUser.providerData.some((p) => p.providerId === "password");
+
 // ─── Profile Setup Modal ──────────────────────────────────────
 function ProfileSetupModal({ pendingUser, onComplete }) {
   const [firstName, setFirstName] = useState("");
@@ -283,9 +287,8 @@ export default function App() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        // Check if email needs verification
-        if (!firebaseUser.emailVerified && firebaseUser.providerData.some(p => p.providerId === 'password')) {
-          setUser({ ...firebaseUser, needsEmailVerification: true });
+        if (requiresEmailVerification(firebaseUser)) {
+          setUser({ ...firebaseUser, email: firebaseUser.email, needsEmailVerification: true });
           setLoading(false);
           return;
         }
@@ -357,6 +360,12 @@ export default function App() {
   };
 
   const handleAuthSuccess = async (firebaseUser) => {
+    if (requiresEmailVerification(firebaseUser)) {
+      setUser({ ...firebaseUser, email: firebaseUser.email, needsEmailVerification: true });
+      setUserRole(null);
+      setLoading(false);
+      return;
+    }
     await resolveUserInRTDB(firebaseUser);
   };
 
