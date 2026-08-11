@@ -1,0 +1,75 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRole(role) {
+      return isAuthenticated() && getUserData().role == role;
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isGuru() {
+      return hasRole('guru');
+    }
+
+    function isAdminOrGuru() {
+      return isAdmin() || isGuru();
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      // Users can read their own profile; admins/gurus can read all
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdminOrGuru());
+      // Users can create their own profile
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      // Users can update their own non-role fields; admins can update anything
+      allow update: if isAuthenticated() && (
+        (request.auth.uid == userId && !('role' in request.resource.data.diff(resource.data).affectedKeys())) ||
+        isAdmin()
+      );
+      // Only admins can delete
+      allow delete: if isAdmin();
+    }
+
+    // Announcements Collection
+    match /announcements/{announcementId} {
+      // All authenticated users can read
+      allow read: if isAuthenticated();
+      // Only teachers and admins can create/update/delete
+      allow write: if isAdminOrGuru();
+    }
+
+    // Guides / Arduino Materials Collection
+    match /guides/{guideId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdminOrGuru();
+    }
+
+    // Config Collection (Active QR token etc.)
+    match /config/{configId} {
+      // Anyone authenticated can read (needed for QR validation)
+      allow read: if isAuthenticated();
+      // Only admins can write QR tokens
+      allow write: if isAdmin();
+    }
+
+    // Attendance Records (optional separate collection for logs)
+    match /attendance/{recordId} {
+      allow read: if isAdminOrGuru() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdminOrGuru();
+    }
+  }
+}
