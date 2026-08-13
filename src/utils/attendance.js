@@ -34,15 +34,19 @@ export function dayNameFromDateKey(dateKey) {
   return DAY_NAMES[new Date(y, m - 1, d).getDay()];
 }
 
-// Writes the attendance log to `teacherAttendance/{uid}/{date}`, a record kept
-// outside the user node so payroll history survives role changes.
-export async function recordTeacherAttendance(user, { source = "qr" } = {}) {
+// Attendance logs live outside the user node so they survive role changes and
+// are never reset automatically.
+export const ATTENDANCE_PATHS = { guru: "teacherAttendance", murid: "studentAttendance" };
+
+const defaultName = (kind) => (kind === "guru" ? "Guru" : "Murid");
+
+export async function recordAttendance(user, { kind = "guru", source = "qr" } = {}) {
   const now = new Date();
   const dateKey = toDateKey(now);
   const timestamp = now.getTime();
   const entry = {
     uid: user.uid,
-    displayName: user.displayName || "Guru",
+    displayName: user.displayName || defaultName(kind),
     email: user.email || "",
     date: dateKey,
     day: toDayName(now),
@@ -55,24 +59,45 @@ export async function recordTeacherAttendance(user, { source = "qr" } = {}) {
     [`users/${user.uid}/hadir`]: true,
     [`users/${user.uid}/lastAttendanceTime`]: timestamp,
     [`users/${user.uid}/history/${dateKey}`]: { date: dateKey, time: entry.time, timestamp },
-    [`teacherAttendance/${user.uid}/${dateKey}`]: entry,
+    [`${ATTENDANCE_PATHS[kind]}/${user.uid}/${dateKey}`]: entry,
   });
 
   return entry;
 }
 
+export const recordTeacherAttendance = (user, options = {}) =>
+  recordAttendance(user, { ...options, kind: "guru" });
+
+export const recordStudentAttendance = (user, options = {}) =>
+  recordAttendance(user, { ...options, kind: "murid" });
+
+// Permanently removes the given rows from both the dedicated log and the legacy
+// `users/{uid}/history` node, and clears today's `hadir` flag when relevant.
+export async function deleteAttendanceRows(rows, { kind = "guru" } = {}) {
+  if (!rows.length) return 0;
+  const todayKey = toDateKey(new Date());
+  const updates = {};
+  rows.forEach(({ uid, date }) => {
+    updates[`${ATTENDANCE_PATHS[kind]}/${uid}/${date}`] = null;
+    updates[`users/${uid}/history/${date}`] = null;
+    if (date === todayKey) updates[`users/${uid}/hadir`] = false;
+  });
+  await update(ref(rtdb), updates);
+  return rows.length;
+}
+
 // Merges the dedicated log with legacy `users/{uid}/history` entries recorded
-// before `teacherAttendance` existed, so no past attendance is dropped.
-export function buildAttendanceRows(teacherAttendance, users) {
+// before the dedicated log existed, so no past attendance is dropped.
+export function buildAttendanceRows(attendanceLog, users, { kind = "guru" } = {}) {
   const usersByUid = new Map(users.map((u) => [u.id, u]));
   const rows = new Map();
 
-  Object.entries(teacherAttendance || {}).forEach(([uid, dates]) => {
+  Object.entries(attendanceLog || {}).forEach(([uid, dates]) => {
     Object.entries(dates || {}).forEach(([dateKey, entry]) => {
       const profile = usersByUid.get(uid);
       rows.set(`${uid}|${dateKey}`, {
         uid,
-        displayName: profile?.displayName || entry.displayName || "Guru",
+        displayName: profile?.displayName || entry.displayName || defaultName(kind),
         email: profile?.email || entry.email || "-",
         date: entry.date || dateKey,
         day: entry.day || dayNameFromDateKey(dateKey),
@@ -84,16 +109,17 @@ export function buildAttendanceRows(teacherAttendance, users) {
     });
   });
 
-  const knownTeachers = new Set(Object.keys(teacherAttendance || {}));
+  const known = new Set(Object.keys(attendanceLog || {}));
+  const matchesKind = (u) => (kind === "guru" ? u.role === "guru" : (u.role || "murid") === "murid");
   users
-    .filter((u) => u.history && (u.role === "guru" || knownTeachers.has(u.id)))
+    .filter((u) => u.history && (matchesKind(u) || known.has(u.id)))
     .forEach((u) => {
       Object.entries(u.history).forEach(([dateKey, h]) => {
         const key = `${u.id}|${dateKey}`;
         if (rows.has(key)) return;
         rows.set(key, {
           uid: u.id,
-          displayName: u.displayName || "Guru",
+          displayName: u.displayName || defaultName(kind),
           email: u.email || "-",
           date: h.date || dateKey,
           day: dayNameFromDateKey(h.date || dateKey),
@@ -132,10 +158,10 @@ export function buildRecap(rows) {
 
 const header = (text) => ({ value: text, fontWeight: "bold", backgroundColor: "#EEEEEE", align: "center" });
 
-export function attendanceColumns() {
+export function attendanceColumns(nameLabel = "Nama Guru") {
   return [
     { header: header("No"), cell: (_, i) => ({ value: i + 1, type: Number }), width: 6 },
-    { header: header("Nama Guru"), cell: (r) => ({ value: r.displayName }), width: 26 },
+    { header: header(nameLabel), cell: (r) => ({ value: r.displayName }), width: 26 },
     { header: header("Email"), cell: (r) => ({ value: r.email }), width: 30 },
     { header: header("Hari"), cell: (r) => ({ value: r.day }), width: 12 },
     { header: header("Tanggal"), cell: (r) => ({ value: r.date }), width: 14 },
@@ -146,10 +172,10 @@ export function attendanceColumns() {
   ];
 }
 
-export function recapColumns() {
+export function recapColumns(nameLabel = "Nama Guru") {
   return [
     { header: header("No"), cell: (_, i) => ({ value: i + 1, type: Number }), width: 6 },
-    { header: header("Nama Guru"), cell: (r) => ({ value: r.displayName }), width: 26 },
+    { header: header(nameLabel), cell: (r) => ({ value: r.displayName }), width: 26 },
     { header: header("Email"), cell: (r) => ({ value: r.email }), width: 30 },
     { header: header("Total Hari Hadir"), cell: (r) => ({ value: r.total, type: Number }), width: 18 },
     { header: header("Kehadiran Pertama"), cell: (r) => ({ value: r.firstDate }), width: 20 },
@@ -158,15 +184,17 @@ export function recapColumns() {
   ];
 }
 
-export async function exportAttendanceToExcel(rows, fileName) {
+export async function exportAttendanceToExcel(rows, fileName, { kind = "guru" } = {}) {
   const { default: writeXlsxFile, getSheetData } = await import("write-excel-file/browser");
 
+  const nameLabel = kind === "guru" ? "Nama Guru" : "Nama Murid";
+  const recapSheet = kind === "guru" ? "Rekap Penggajian" : "Rekap Kehadiran";
   const recap = buildRecap(rows);
-  const recapCols = recapColumns();
-  const detailCols = attendanceColumns();
+  const recapCols = recapColumns(nameLabel);
+  const detailCols = attendanceColumns(nameLabel);
 
   await writeXlsxFile([
-    { data: getSheetData(recap, recapCols), columns: recapCols, sheet: "Rekap Penggajian", stickyRowsCount: 1 },
+    { data: getSheetData(recap, recapCols), columns: recapCols, sheet: recapSheet, stickyRowsCount: 1 },
     { data: getSheetData(rows, detailCols), columns: detailCols, sheet: "Detail Kehadiran", stickyRowsCount: 1 },
   ]).toFile(fileName);
 }

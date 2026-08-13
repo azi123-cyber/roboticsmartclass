@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { rtdb } from "../firebase";
-import { ref, onValue, set, get, update } from "firebase/database";
+import { ref, onValue, get } from "firebase/database";
 import { Html5Qrcode } from "html5-qrcode";
-import { toDateKey, toTimeString } from "../utils/attendance";
+import { recordStudentAttendance } from "../utils/attendance";
 
 // ─── Real QR Scanner Panel ────────────────────────────────────
 function QRScanPanel({ user, onSuccess }) {
@@ -48,20 +48,7 @@ function QRScanPanel({ user, onSuccess }) {
         return;
       }
 
-      // Record Attendance in RTDB users/{uid}
-      const userRef = ref(rtdb, `users/${user.uid}`);
-      await update(userRef, {
-        hadir: true,
-        lastAttendanceTime: Date.now(),
-      });
-
-      const dateStr = toDateKey(new Date());
-      const timeStr = toTimeString(new Date());
-      await set(ref(rtdb, `users/${user.uid}/history/${dateStr}`), {
-        date: dateStr,
-        time: timeStr,
-        timestamp: Date.now()
-      });
+      await recordStudentAttendance(user);
 
       setSuccess(true);
       if (onSuccess) onSuccess();
