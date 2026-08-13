@@ -178,6 +178,7 @@ function SidebarContent({ user, userRole, activeSection, onNavigate, onLogout })
         { id: "qr", label: "QR Absensi", icon: icons.qr },
         { id: "users", label: "Data Pengguna", icon: icons.users },
         { id: "teacher_attendance", label: "Kehadiran Guru", icon: icons.attend },
+        { id: "student_attendance", label: "Kehadiran Murid", icon: icons.attend },
         { id: "materials", label: "Materi & Konten", icon: icons.book },
       ]
     : userRole === "guru"
@@ -462,6 +463,7 @@ export default function App() {
                 {currentSection === "qr" && "Panel QR Absensi"}
                 {currentSection === "users" && "Manajemen Pengguna"}
                 {currentSection === "teacher_attendance" && "Kehadiran Guru"}
+                {currentSection === "student_attendance" && "Kehadiran Murid"}
                 {currentSection === "attendance" && "Daftar Hadir Siswa"}
                 {currentSection === "materials" && "Materi & Konten"}
                 {currentSection === "announce" && "Kelola Pengumuman"}

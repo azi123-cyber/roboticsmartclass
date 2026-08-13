@@ -2,7 +2,9 @@ import React, { useState, useEffect } from "react";
 import { rtdb } from "../firebase";
 import { ref, onValue, set, update, get } from "firebase/database";
 import { Html5Qrcode } from "html5-qrcode";
-import { recordTeacherAttendance, toDateKey } from "../utils/attendance";
+import {
+  ATTENDANCE_SESSION_PATH, isPresentInSession, recordTeacherAttendance, toDateKey,
+} from "../utils/attendance";
 
 // ─── Real QR Scanner Panel (Teacher) ──────────────────────────
 function QRScanPanel({ user, onSuccess }) {
@@ -259,6 +261,7 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
   const [matSuccess, setMatSuccess] = useState(false);
 
   const [userData, setUserData] = useState(null);
+  const [session, setSession] = useState(null);
 
   useEffect(() => {
     // 1. Current teacher data listener
@@ -280,9 +283,15 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
       setUsersLoading(false);
     });
 
+    // 3. Current attendance session — presence expires when admin opens a new one
+    const unsubSession = onValue(ref(rtdb, ATTENDANCE_SESSION_PATH), (snap) => {
+      setSession(snap.exists() ? snap.val() : null);
+    });
+
     return () => {
       unsubUser();
       unsub();
+      unsubSession();
     };
   }, [user.uid]);
 
@@ -326,8 +335,8 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
     setMatSaving(false);
   };
 
-  const hadirCount = allUsers.filter(u => u.hadir).length;
-  const isUserPresent = userData?.hadir || false;
+  const isPresent = (u) => isPresentInSession(u, session);
+  const isUserPresent = isPresentInSession(userData, session);
 
   if (activeSection === "absensi_guru") {
     return (
@@ -385,7 +394,7 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
   if (activeSection === "attendance") {
     // Filter only students (murid)
     const students = allUsers.filter(u => u.role === "murid");
-    const hadirStudents = students.filter(u => u.hadir).length;
+    const hadirStudents = students.filter(isPresent).length;
 
     // Teacher must check in first
     if (!isUserPresent) {
@@ -440,6 +449,7 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
                 {students.map((u, i) => {
                   const todayStr = toDateKey(new Date());
                   const todayAtt = u.history ? u.history[todayStr] : null;
+                  const hadir = isPresent(u);
                   return (
                     <tr key={u.id} className="tr-hover" style={{ borderBottom: "1px solid var(--border)" }}>
                       <td style={{ padding: "10px 14px", fontSize: "11px", color: "var(--text-muted)" }}>{i + 1}</td>
@@ -448,8 +458,8 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
                         <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>{u.email || "-"}</div>
                       </td>
                       <td style={{ padding: "10px 14px" }}>
-                        <span className={`badge ${u.hadir ? "badge-emerald" : "badge-red"}`}>
-                          {u.hadir ? "✓ Hadir" : "Belum Absen"}
+                        <span className={`badge ${hadir ? "badge-emerald" : "badge-red"}`}>
+                          {hadir ? "✓ Hadir" : "Belum Absen"}
                         </span>
                       </td>
                       <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-muted)" }}>
@@ -457,8 +467,8 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
                       </td>
                       <td style={{ padding: "10px 14px" }}>
                         {/* Guru hanya boleh MENOLAK kehadiran, tidak bisa memberi hadir */}
-                        {u.hadir ? (
-                          <button onClick={() => handleToggleAttend(u.id, u.hadir)}
+                        {hadir ? (
+                          <button onClick={() => handleToggleAttend(u.id, hadir)}
                             style={{ padding: "4px 10px", fontSize: "11px", fontWeight: 700, borderRadius: "6px", border: "none", cursor: "pointer", background: "rgba(248,113,113,0.12)", color: "var(--red)" }}>
                             Tolak Kehadiran
                           </button>

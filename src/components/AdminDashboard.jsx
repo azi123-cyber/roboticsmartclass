@@ -3,8 +3,9 @@ import { rtdb } from "../firebase";
 import { ref, onValue, set, update } from "firebase/database";
 import QRCode from "qrcode";
 import {
-  buildAttendanceRows, buildRecap, exportAttendanceToExcel,
-  monthLabel, recordTeacherAttendance, sourceLabel, toDateKey,
+  ATTENDANCE_SESSION_PATH, buildAttendanceRows, buildRecap, deleteAttendanceRows,
+  exportAttendanceToExcel, isPresentInSession, monthLabel, recordAttendance,
+  sessionLabel, sourceLabel, startAttendanceSession, toDateKey,
 } from "../utils/attendance";
 
 // ─── QR Canvas ────────────────────────────────────────────────
@@ -40,12 +41,20 @@ export default function AdminDashboard({ user, activeSection }) {
   const [allUsers, setAllUsers] = useState([]);
   const [usersLoading, setUsersLoading] = useState(true);
 
-  // Teacher attendance log (kept outside the user node)
+  // Attendance logs (kept outside the user node so they are never auto-reset)
   const [teacherAttendance, setTeacherAttendance] = useState({});
-  const [monthFilter, setMonthFilter] = useState("all");
-  const [teacherFilter, setTeacherFilter] = useState("all");
+  const [studentAttendance, setStudentAttendance] = useState({});
+  const [monthFilters, setMonthFilters] = useState({ guru: "all", murid: "all" });
+  const [personFilters, setPersonFilters] = useState({ guru: "all", murid: "all" });
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteInfo, setDeleteInfo] = useState("");
+  const [deleteDate, setDeleteDate] = useState(() => toDateKey(new Date()));
+
+  // Attendance session (only reset by the dedicated admin button)
+  const [session, setSession] = useState(null);
+  const [startingSession, setStartingSession] = useState(false);
 
   // Material upload
   const [matTitle, setMatTitle] = useState("");
@@ -112,11 +121,36 @@ export default function AdminDashboard({ user, activeSection }) {
   }, []);
 
   useEffect(() => {
-    const unsub = onValue(ref(rtdb, "teacherAttendance"), (snap) => {
+    const unsubTeacher = onValue(ref(rtdb, "teacherAttendance"), (snap) => {
       setTeacherAttendance(snap.exists() ? snap.val() : {});
+    });
+    const unsubStudent = onValue(ref(rtdb, "studentAttendance"), (snap) => {
+      setStudentAttendance(snap.exists() ? snap.val() : {});
+    });
+    return () => { unsubTeacher(); unsubStudent(); };
+  }, []);
+
+  useEffect(() => {
+    const unsub = onValue(ref(rtdb, ATTENDANCE_SESSION_PATH), (snap) => {
+      setSession(snap.exists() ? snap.val() : null);
     });
     return () => unsub();
   }, []);
+
+  // Expires the previous round: everyone must scan again. The permanent logs
+  // and the QR generator state are left untouched.
+  const handleStartSession = async () => {
+    const ok = window.confirm(
+      "Mulai sesi absensi baru?\n\nSemua status \"hadir\" saat ini akan kedaluwarsa dan setiap orang harus absen ulang. Riwayat absensi yang sudah tersimpan tidak terhapus.",
+    );
+    if (!ok) return;
+
+    setStartingSession(true);
+    try {
+      await startAttendanceSession(allUsers, user);
+    } catch (e) { console.error(e); }
+    setStartingSession(false);
+  };
 
   const handleRoleChange = async (uid, newRole) => {
     try {
@@ -124,19 +158,19 @@ export default function AdminDashboard({ user, activeSection }) {
     } catch (e) { console.error(e); }
   };
 
-  const handleToggleAttend = async (uid, currentHadir) => {
+  // Manual check-in produces a real log entry; undoing it removes today's entry.
+  const handleToggleAttend = async (u, currentHadir) => {
+    const kind = u.role === "guru" ? "guru" : "murid";
     try {
-      await update(ref(rtdb, `users/${uid}`), { hadir: !currentHadir });
-    } catch (e) { console.error(e); }
-  };
-
-  // Manual check-in still produces a payroll log entry.
-  const handleMarkTeacherPresent = async (teacher) => {
-    try {
-      await recordTeacherAttendance(
-        { uid: teacher.id, displayName: teacher.displayName, email: teacher.email },
-        { source: "manual-admin" },
-      );
+      if (currentHadir) {
+        await deleteAttendanceRows([{ uid: u.id, date: toDateKey(new Date()) }], { kind });
+        await update(ref(rtdb, `users/${u.id}`), { hadir: false });
+      } else {
+        await recordAttendance(
+          { uid: u.id, displayName: u.displayName, email: u.email },
+          { kind, source: "manual-admin" },
+        );
+      }
     } catch (e) { console.error(e); }
   };
 
@@ -159,8 +193,9 @@ export default function AdminDashboard({ user, activeSection }) {
 
   // ── QR Section ─────────────────────────────────────────────
   if (activeSection === "qr") {
-    const hadirCount = allUsers.filter(u => u.hadir).length;
-    const notHadirCount = allUsers.filter(u => !u.hadir).length;
+    const isPresent = (u) => isPresentInSession(u, session);
+    const hadirCount = allUsers.filter(isPresent).length;
+    const notHadirCount = allUsers.length - hadirCount;
 
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -178,6 +213,28 @@ export default function AdminDashboard({ user, activeSection }) {
               <div style={{ fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", marginTop: "2px" }}>{s.label}</div>
             </div>
           ))}
+        </div>
+
+        {/* Attendance Session Control */}
+        <div className="animated-card" style={{
+          background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px",
+          padding: "16px 18px", display: "flex", flexWrap: "wrap", gap: "12px",
+          alignItems: "center", justifyContent: "space-between",
+        }}>
+          <div>
+            <h3 style={{ fontSize: "15px", fontWeight: 700, color: "var(--text-primary)" }}>Sesi Absensi</h3>
+            <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
+              Sesi aktif: <strong style={{ color: "var(--purple-light)" }}>{sessionLabel(session)}</strong>
+              {session?.startedBy ? ` (oleh ${session.startedBy})` : ""}
+            </p>
+            <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
+              Status hadir hanya kedaluwarsa saat tombol ini ditekan — menyalakan/mematikan QR tidak mengubah sesi.
+            </p>
+          </div>
+          <button onClick={handleStartSession} disabled={startingSession} className="btn-primary"
+            style={{ padding: "8px 16px", fontSize: "12px", opacity: startingSession ? 0.6 : 1 }}>
+            {startingSession ? "Memproses…" : "Mulai Absensi Baru"}
+          </button>
         </div>
 
         <div className="responsive-grid-2">
@@ -249,7 +306,9 @@ export default function AdminDashboard({ user, activeSection }) {
                   Belum ada siswa yang terdaftar di database.
                 </div>
               ) : (
-                allUsers.map((u) => (
+                allUsers.map((u) => {
+                  const hadir = isPresent(u);
+                  return (
                   <div key={u.id} style={{
                     display: "flex", alignItems: "center", gap: "10px",
                     padding: "8px 10px", borderRadius: "10px",
@@ -257,10 +316,10 @@ export default function AdminDashboard({ user, activeSection }) {
                   }}>
                     <div style={{
                       width: "30px", height: "30px", borderRadius: "8px", flexShrink: 0,
-                      background: u.hadir ? "rgba(52,211,153,0.15)" : "rgba(255,255,255,0.04)",
-                      border: `1px solid ${u.hadir ? "rgba(52,211,153,0.3)" : "var(--border)"}`,
+                      background: hadir ? "rgba(52,211,153,0.15)" : "rgba(255,255,255,0.04)",
+                      border: `1px solid ${hadir ? "rgba(52,211,153,0.3)" : "var(--border)"}`,
                       display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: "12px", fontWeight: 700, color: u.hadir ? "var(--emerald)" : "var(--text-muted)",
+                      fontSize: "12px", fontWeight: 700, color: hadir ? "var(--emerald)" : "var(--text-muted)",
                     }}>
                       {(u.displayName || "?")[0].toUpperCase()}
                     </div>
@@ -268,21 +327,22 @@ export default function AdminDashboard({ user, activeSection }) {
                       <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {u.displayName || "Pengguna"}
                       </div>
-                      <div style={{ fontSize: "10px", color: u.hadir ? "var(--emerald)" : "var(--text-muted)" }}>
-                        {u.hadir ? "✓ Hadir" : "Belum hadir"}
+                      <div style={{ fontSize: "10px", color: hadir ? "var(--emerald)" : "var(--text-muted)" }}>
+                        {hadir ? "✓ Hadir" : "Belum hadir"}
                       </div>
                     </div>
-                    <button onClick={() => handleToggleAttend(u.id, u.hadir)}
+                    <button onClick={() => handleToggleAttend(u, hadir)}
                       style={{
                         padding: "4px 8px", fontSize: "10px", fontWeight: 700,
                         borderRadius: "6px", border: "none", cursor: "pointer",
-                        background: u.hadir ? "rgba(248,113,113,0.12)" : "rgba(52,211,153,0.12)",
-                        color: u.hadir ? "var(--red)" : "var(--emerald)",
+                        background: hadir ? "rgba(248,113,113,0.12)" : "rgba(52,211,153,0.12)",
+                        color: hadir ? "var(--red)" : "var(--emerald)",
                       }}>
-                      {u.hadir ? "Tolak" : "Set Hadir"}
+                      {hadir ? "Tolak" : "Set Hadir"}
                     </button>
                   </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -322,8 +382,8 @@ export default function AdminDashboard({ user, activeSection }) {
                     </td>
                     <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-muted)" }}>{u.email || "-"}</td>
                     <td style={{ padding: "10px 14px" }}>
-                      <span className={`badge ${u.hadir ? "badge-emerald" : "badge-red"}`}>
-                        {u.hadir ? "✓ Hadir" : "Belum Absen"}
+                      <span className={`badge ${isPresentInSession(u, session) ? "badge-emerald" : "badge-red"}`}>
+                        {isPresentInSession(u, session) ? "✓ Hadir" : "Belum Absen"}
                       </span>
                     </td>
                     <td style={{ padding: "10px 14px" }}>
@@ -347,8 +407,8 @@ export default function AdminDashboard({ user, activeSection }) {
                       </select>
                     </td>
                     <td style={{ padding: "10px 14px" }}>
-                      <button onClick={() => handleToggleAttend(u.id, u.hadir)} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
-                        {u.hadir ? "Tolak Absen" : "Set Hadir"}
+                      <button onClick={() => handleToggleAttend(u, isPresentInSession(u, session))} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
+                        {isPresentInSession(u, session) ? "Tolak Absen" : "Set Hadir"}
                       </button>
                     </td>
                   </tr>
@@ -361,26 +421,37 @@ export default function AdminDashboard({ user, activeSection }) {
     );
   }
 
-  // ── Teacher Attendance Section ──────────────────────────────
-  if (activeSection === "teacher_attendance") {
-    const attendanceRows = buildAttendanceRows(teacherAttendance, allUsers);
+  // ── Attendance Sections (guru & murid) ──────────────────────
+  const attendanceKind =
+    activeSection === "teacher_attendance" ? "guru" :
+    activeSection === "student_attendance" ? "murid" : null;
 
+  if (attendanceKind) {
+    const kind = attendanceKind;
+    const isTeacher = kind === "guru";
+    const label = isTeacher ? "Guru" : "Murid";
+    const log = isTeacher ? teacherAttendance : studentAttendance;
+    const monthFilter = monthFilters[kind];
+    const personFilter = personFilters[kind];
+
+    const attendanceRows = buildAttendanceRows(log, allUsers, { kind });
     const months = [...new Set(attendanceRows.map(r => r.date.slice(0, 7)))].sort().reverse();
-    const teacherOptions = [...new Map(attendanceRows.map(r => [r.uid, r.displayName])).entries()];
+    const personOptions = [...new Map(attendanceRows.map(r => [r.uid, r.displayName])).entries()];
 
     const filteredRows = attendanceRows.filter(r =>
       (monthFilter === "all" || r.date.startsWith(monthFilter)) &&
-      (teacherFilter === "all" || r.uid === teacherFilter)
+      (personFilter === "all" || r.uid === personFilter)
     );
     const recap = buildRecap(filteredRows);
     const todayStr = toDateKey(new Date());
     const presentToday = new Set(filteredRows.filter(r => r.date === todayStr).map(r => r.uid));
+    const peopleToday = allUsers.filter(u => (isTeacher ? u.role === "guru" : (u.role || "murid") === "murid"));
 
     const handleExport = async () => {
       setExporting(true); setExportError("");
       try {
         const scope = monthFilter === "all" ? "semua-bulan" : monthFilter;
-        await exportAttendanceToExcel(filteredRows, `absensi-guru-${scope}.xlsx`);
+        await exportAttendanceToExcel(filteredRows, `absensi-${kind}-${scope}.xlsx`, { kind });
       } catch (e) {
         console.error(e);
         setExportError("Gagal membuat file Excel. Coba lagi.");
@@ -388,13 +459,45 @@ export default function AdminDashboard({ user, activeSection }) {
       setExporting(false);
     };
 
+    // Deletion is always explicit: nothing is ever removed automatically.
+    const handleDelete = async (rowsToDelete, description) => {
+      if (rowsToDelete.length === 0) {
+        setDeleteInfo(`Tidak ada data untuk ${description}.`);
+        return;
+      }
+      const ok = window.confirm(
+        `Hapus permanen ${rowsToDelete.length} data kehadiran ${label.toLowerCase()} (${description})?\n\nData yang dihapus tidak bisa dikembalikan.`
+      );
+      if (!ok) return;
+      setDeleting(true); setDeleteInfo("");
+      try {
+        await deleteAttendanceRows(rowsToDelete, { kind });
+        setDeleteInfo(`${rowsToDelete.length} data kehadiran (${description}) dihapus.`);
+      } catch (e) {
+        console.error(e);
+        setDeleteInfo("Gagal menghapus data. Coba lagi.");
+      }
+      setDeleting(false);
+    };
+
+    const deleteByDate = () =>
+      handleDelete(attendanceRows.filter(r => r.date === deleteDate), `tanggal ${deleteDate}`);
+    const deleteByMonth = () =>
+      handleDelete(
+        attendanceRows.filter(r => r.date.startsWith(deleteDate.slice(0, 7))),
+        `bulan ${monthLabel(deleteDate.slice(0, 7))}`,
+      );
+    const deleteAll = () => handleDelete(attendanceRows, "semua kehadiran");
+
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
           <div>
-            <h3 style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>Daftar Kehadiran Guru (Penggajian)</h3>
+            <h3 style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>
+              {isTeacher ? "Daftar Kehadiran Guru (Penggajian)" : "Daftar Kehadiran Murid"}
+            </h3>
             <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
-              Log kehadiran tersimpan permanen dan tetap ada meskipun role guru diubah.
+              Log kehadiran tersimpan permanen (tidak pernah terhapus otomatis) dan tetap ada meskipun role diubah.
             </p>
           </div>
           <button onClick={handleExport} disabled={exporting || filteredRows.length === 0} className="btn-primary"
@@ -412,7 +515,7 @@ export default function AdminDashboard({ user, activeSection }) {
         <div className="responsive-grid-3">
           {[
             { label: "Total Data Kehadiran", value: filteredRows.length, color: "var(--purple)" },
-            { label: "Guru Tercatat", value: recap.length, color: "var(--cyan)" },
+            { label: `${label} Tercatat`, value: recap.length, color: "var(--cyan)" },
             { label: "Hadir Hari Ini", value: presentToday.size, color: "var(--emerald)" },
           ].map((s, i) => (
             <div key={i} className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", padding: "16px 18px" }}>
@@ -425,31 +528,57 @@ export default function AdminDashboard({ user, activeSection }) {
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
           <div>
             <label style={{ fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>Bulan</label>
-            <select value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
+            <select value={monthFilter} onChange={(e) => setMonthFilters(f => ({ ...f, [kind]: e.target.value }))}>
               <option value="all">Semua Bulan</option>
               {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
             </select>
           </div>
           <div>
-            <label style={{ fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>Guru</label>
-            <select value={teacherFilter} onChange={(e) => setTeacherFilter(e.target.value)}>
-              <option value="all">Semua Guru</option>
-              {teacherOptions.map(([uid, name]) => <option key={uid} value={uid}>{name}</option>)}
+            <label style={{ fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>{label}</label>
+            <select value={personFilter} onChange={(e) => setPersonFilters(f => ({ ...f, [kind]: e.target.value }))}>
+              <option value="all">Semua {label}</option>
+              {personOptions.map(([uid, name]) => <option key={uid} value={uid}>{name}</option>)}
             </select>
           </div>
         </div>
 
-        <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-primary)" }}>Rekap per Guru</h4>
+        {/* Manual data deletion */}
+        <div className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: "16px", padding: "16px 18px" }}>
+          <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--red)" }}>Hapus Data Kehadiran</h4>
+          <p style={{ fontSize: "11px", color: "var(--text-muted)", margin: "4px 0 10px" }}>
+            Data hanya hilang jika dihapus di sini. Penghapusan bersifat permanen.
+          </p>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div>
+              <label style={{ fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>Tanggal</label>
+              <input type="date" value={deleteDate} onChange={(e) => setDeleteDate(e.target.value)} className="input-field" style={{ padding: "8px 10px", fontSize: "12px" }} />
+            </div>
+            <button onClick={deleteByDate} disabled={deleting} className="btn-ghost" style={{ padding: "8px 12px", fontSize: "12px", color: "var(--red)" }}>
+              Hapus Hari Ini/Tanggal
+            </button>
+            <button onClick={deleteByMonth} disabled={deleting} className="btn-ghost" style={{ padding: "8px 12px", fontSize: "12px", color: "var(--red)" }}>
+              Hapus Bulan {monthLabel(deleteDate.slice(0, 7))}
+            </button>
+            <button onClick={deleteAll} disabled={deleting} className="btn-ghost" style={{ padding: "8px 12px", fontSize: "12px", color: "var(--red)" }}>
+              Hapus Semua Kehadiran {label}
+            </button>
+          </div>
+          {deleteInfo && (
+            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>{deleteInfo}</div>
+          )}
+        </div>
+
+        <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-primary)" }}>Rekap per {label}</h4>
         <div className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", overflowX: "auto" }}>
           {recap.length === 0 ? (
             <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>
-              Belum ada kehadiran guru yang tercatat.
+              Belum ada kehadiran {label.toLowerCase()} yang tercatat.
             </div>
           ) : (
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "560px" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["#", "Nama Guru", "Email", "Total Hari Hadir", "Kehadiran Terakhir", "Role Saat Ini"].map((h) => (
+                  {["#", `Nama ${label}`, "Email", "Total Hari Hadir", "Kehadiran Terakhir", "Role Saat Ini"].map((h) => (
                     <th key={h} style={{ padding: "10px 14px", textAlign: "left", fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>{h}</th>
                   ))}
                 </tr>
@@ -463,7 +592,7 @@ export default function AdminDashboard({ user, activeSection }) {
                     <td style={{ padding: "10px 14px", fontSize: "13px", fontWeight: 700, color: "var(--emerald)" }}>{r.total} hari</td>
                     <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-secondary)" }}>{r.lastDate}</td>
                     <td style={{ padding: "10px 14px" }}>
-                      <span className={`badge ${r.currentRole === "guru" ? "badge-cyan" : "badge-red"}`}>{r.currentRole}</span>
+                      <span className="badge badge-cyan">{r.currentRole}</span>
                     </td>
                   </tr>
                 ))}
@@ -482,7 +611,7 @@ export default function AdminDashboard({ user, activeSection }) {
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "640px" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["#", "Nama Guru", "Email", "Hari", "Tanggal", "Jam Masuk", "Sumber"].map((h) => (
+                  {["#", `Nama ${label}`, "Email", "Hari", "Tanggal", "Jam Masuk", "Sumber", "Aksi"].map((h) => (
                     <th key={h} style={{ padding: "10px 14px", textAlign: "left", fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>{h}</th>
                   ))}
                 </tr>
@@ -497,6 +626,12 @@ export default function AdminDashboard({ user, activeSection }) {
                     <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-secondary)" }}>{r.date}</td>
                     <td style={{ padding: "10px 14px", fontSize: "12px", fontWeight: 700, color: "var(--cyan)" }}>{r.time}</td>
                     <td style={{ padding: "10px 14px", fontSize: "11px", color: "var(--text-muted)" }}>{sourceLabel(r.source)}</td>
+                    <td style={{ padding: "10px 14px" }}>
+                      <button onClick={() => handleDelete([r], `${r.displayName} - ${r.date}`)} disabled={deleting}
+                        style={{ padding: "4px 8px", fontSize: "10px", fontWeight: 700, borderRadius: "6px", border: "none", cursor: "pointer", background: "rgba(248,113,113,0.12)", color: "var(--red)" }}>
+                        Hapus
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -504,30 +639,30 @@ export default function AdminDashboard({ user, activeSection }) {
           )}
         </div>
 
-        <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-primary)" }}>Status Guru Hari Ini</h4>
+        <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-primary)" }}>Status {label} Hari Ini</h4>
         <div className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", overflowX: "auto" }}>
           {usersLoading ? (
             <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Memuat data database...</div>
-          ) : allUsers.filter(u => u.role === "guru").length === 0 ? (
+          ) : peopleToday.length === 0 ? (
             <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>
-              Belum ada guru yang terdaftar di database.
+              Belum ada {label.toLowerCase()} yang terdaftar di database.
             </div>
           ) : (
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "520px" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["#", "Nama Guru", "Email", "Status Hari Ini", "Jam Masuk", "Aksi"].map((h) => (
+                  {["#", `Nama ${label}`, "Email", "Status Hari Ini", "Jam Masuk", "Aksi"].map((h) => (
                     <th key={h} style={{ padding: "10px 14px", textAlign: "left", fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {allUsers.filter(u => u.role === "guru").map((t, i) => {
-                  const todayEntry = teacherAttendance?.[t.id]?.[todayStr];
+                {peopleToday.map((t, i) => {
+                  const todayEntry = log?.[t.id]?.[todayStr];
                   return (
                     <tr key={t.id} className="tr-hover" style={{ borderBottom: "1px solid var(--border)" }}>
                       <td style={{ padding: "10px 14px", fontSize: "11px", color: "var(--text-muted)" }}>{i + 1}</td>
-                      <td style={{ padding: "10px 14px", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>{t.displayName || "Guru"}</td>
+                      <td style={{ padding: "10px 14px", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>{t.displayName || label}</td>
                       <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-muted)" }}>{t.email || "-"}</td>
                       <td style={{ padding: "10px 14px" }}>
                         <span className={`badge ${todayEntry ? "badge-emerald" : "badge-red"}`}>
@@ -539,7 +674,7 @@ export default function AdminDashboard({ user, activeSection }) {
                         {todayEntry ? (
                           <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>Tercatat</span>
                         ) : (
-                          <button onClick={() => handleMarkTeacherPresent(t)} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
+                          <button onClick={() => handleToggleAttend(t, false)} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
                             Set Hadir
                           </button>
                         )}
