@@ -65,6 +65,43 @@ export async function recordAttendance(user, { kind = "guru", source = "qr" } = 
   return entry;
 }
 
+// A session marks the start of a new attendance round. Everything recorded
+// before it counts as expired, while the permanent logs stay untouched.
+export const ATTENDANCE_SESSION_PATH = "config/attendanceSession";
+
+export async function startAttendanceSession(users, admin = {}) {
+  const now = new Date();
+  const session = {
+    id: `sesi-${now.getTime()}`,
+    startedAt: now.getTime(),
+    date: toDateKey(now),
+    day: toDayName(now),
+    time: toTimeString(now),
+    startedBy: admin.displayName || admin.email || "Admin",
+  };
+
+  const updates = { [ATTENDANCE_SESSION_PATH]: session };
+  users.forEach((u) => {
+    const uid = u.id || u.uid;
+    if (uid) updates[`users/${uid}/hadir`] = false;
+  });
+
+  await update(ref(rtdb), updates);
+  return session;
+}
+
+// Presence only counts when it was recorded after the current session started.
+export function isPresentInSession(user, session) {
+  if (!user?.hadir) return false;
+  if (!session?.startedAt) return true;
+  return (user.lastAttendanceTime || 0) >= session.startedAt;
+}
+
+export function sessionLabel(session) {
+  if (!session?.startedAt) return "Belum ada sesi absensi";
+  return `${session.day}, ${session.date} • ${session.time}`;
+}
+
 export const recordTeacherAttendance = (user, options = {}) =>
   recordAttendance(user, { ...options, kind: "guru" });
 

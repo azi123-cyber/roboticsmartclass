@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { rtdb } from "../firebase";
 import { ref, onValue, get } from "firebase/database";
 import { Html5Qrcode } from "html5-qrcode";
-import { recordStudentAttendance } from "../utils/attendance";
+import { ATTENDANCE_SESSION_PATH, isPresentInSession, recordStudentAttendance } from "../utils/attendance";
 
 // ─── Real QR Scanner Panel ────────────────────────────────────
 function QRScanPanel({ user, onSuccess }) {
@@ -290,6 +290,7 @@ export default function StudentDashboard({ user, activeSection }) {
   const [announcements, setAnnouncements] = useState([]);
   const [guides, setGuides] = useState([]);
   const [userData, setUserData] = useState(null);
+  const [session, setSession] = useState(null);
 
   useEffect(() => {
     // 1. RTDB User listener
@@ -322,10 +323,15 @@ export default function StudentDashboard({ user, activeSection }) {
       }
     });
 
-    return () => { unsubUser(); unsubAnn(); unsubGuide(); };
+    // 4. Current attendance session — presence expires when admin opens a new one
+    const unsubSession = onValue(ref(rtdb, ATTENDANCE_SESSION_PATH), (snap) => {
+      setSession(snap.exists() ? snap.val() : null);
+    });
+
+    return () => { unsubUser(); unsubAnn(); unsubGuide(); unsubSession(); };
   }, [user.uid]);
 
-  const isUserPresent = userData?.hadir || false;
+  const isUserPresent = isPresentInSession(userData, session);
 
   if (activeSection === "absensi") {
     return (

@@ -3,8 +3,9 @@ import { rtdb } from "../firebase";
 import { ref, onValue, set, update } from "firebase/database";
 import QRCode from "qrcode";
 import {
-  buildAttendanceRows, buildRecap, deleteAttendanceRows, exportAttendanceToExcel,
-  monthLabel, recordAttendance, sourceLabel, toDateKey,
+  ATTENDANCE_SESSION_PATH, buildAttendanceRows, buildRecap, deleteAttendanceRows,
+  exportAttendanceToExcel, isPresentInSession, monthLabel, recordAttendance,
+  sessionLabel, sourceLabel, startAttendanceSession, toDateKey,
 } from "../utils/attendance";
 
 // ─── QR Canvas ────────────────────────────────────────────────
@@ -50,6 +51,10 @@ export default function AdminDashboard({ user, activeSection }) {
   const [deleting, setDeleting] = useState(false);
   const [deleteInfo, setDeleteInfo] = useState("");
   const [deleteDate, setDeleteDate] = useState(() => toDateKey(new Date()));
+
+  // Attendance session (only reset by the dedicated admin button)
+  const [session, setSession] = useState(null);
+  const [startingSession, setStartingSession] = useState(false);
 
   // Material upload
   const [matTitle, setMatTitle] = useState("");
@@ -125,6 +130,28 @@ export default function AdminDashboard({ user, activeSection }) {
     return () => { unsubTeacher(); unsubStudent(); };
   }, []);
 
+  useEffect(() => {
+    const unsub = onValue(ref(rtdb, ATTENDANCE_SESSION_PATH), (snap) => {
+      setSession(snap.exists() ? snap.val() : null);
+    });
+    return () => unsub();
+  }, []);
+
+  // Expires the previous round: everyone must scan again. The permanent logs
+  // and the QR generator state are left untouched.
+  const handleStartSession = async () => {
+    const ok = window.confirm(
+      "Mulai sesi absensi baru?\n\nSemua status \"hadir\" saat ini akan kedaluwarsa dan setiap orang harus absen ulang. Riwayat absensi yang sudah tersimpan tidak terhapus.",
+    );
+    if (!ok) return;
+
+    setStartingSession(true);
+    try {
+      await startAttendanceSession(allUsers, user);
+    } catch (e) { console.error(e); }
+    setStartingSession(false);
+  };
+
   const handleRoleChange = async (uid, newRole) => {
     try {
       await update(ref(rtdb, `users/${uid}`), { role: newRole });
@@ -166,8 +193,9 @@ export default function AdminDashboard({ user, activeSection }) {
 
   // ── QR Section ─────────────────────────────────────────────
   if (activeSection === "qr") {
-    const hadirCount = allUsers.filter(u => u.hadir).length;
-    const notHadirCount = allUsers.filter(u => !u.hadir).length;
+    const isPresent = (u) => isPresentInSession(u, session);
+    const hadirCount = allUsers.filter(isPresent).length;
+    const notHadirCount = allUsers.length - hadirCount;
 
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -185,6 +213,28 @@ export default function AdminDashboard({ user, activeSection }) {
               <div style={{ fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", marginTop: "2px" }}>{s.label}</div>
             </div>
           ))}
+        </div>
+
+        {/* Attendance Session Control */}
+        <div className="animated-card" style={{
+          background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px",
+          padding: "16px 18px", display: "flex", flexWrap: "wrap", gap: "12px",
+          alignItems: "center", justifyContent: "space-between",
+        }}>
+          <div>
+            <h3 style={{ fontSize: "15px", fontWeight: 700, color: "var(--text-primary)" }}>Sesi Absensi</h3>
+            <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
+              Sesi aktif: <strong style={{ color: "var(--purple-light)" }}>{sessionLabel(session)}</strong>
+              {session?.startedBy ? ` (oleh ${session.startedBy})` : ""}
+            </p>
+            <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
+              Status hadir hanya kedaluwarsa saat tombol ini ditekan — menyalakan/mematikan QR tidak mengubah sesi.
+            </p>
+          </div>
+          <button onClick={handleStartSession} disabled={startingSession} className="btn-primary"
+            style={{ padding: "8px 16px", fontSize: "12px", opacity: startingSession ? 0.6 : 1 }}>
+            {startingSession ? "Memproses…" : "Mulai Absensi Baru"}
+          </button>
         </div>
 
         <div className="responsive-grid-2">
@@ -256,7 +306,9 @@ export default function AdminDashboard({ user, activeSection }) {
                   Belum ada siswa yang terdaftar di database.
                 </div>
               ) : (
-                allUsers.map((u) => (
+                allUsers.map((u) => {
+                  const hadir = isPresent(u);
+                  return (
                   <div key={u.id} style={{
                     display: "flex", alignItems: "center", gap: "10px",
                     padding: "8px 10px", borderRadius: "10px",
@@ -264,10 +316,10 @@ export default function AdminDashboard({ user, activeSection }) {
                   }}>
                     <div style={{
                       width: "30px", height: "30px", borderRadius: "8px", flexShrink: 0,
-                      background: u.hadir ? "rgba(52,211,153,0.15)" : "rgba(255,255,255,0.04)",
-                      border: `1px solid ${u.hadir ? "rgba(52,211,153,0.3)" : "var(--border)"}`,
+                      background: hadir ? "rgba(52,211,153,0.15)" : "rgba(255,255,255,0.04)",
+                      border: `1px solid ${hadir ? "rgba(52,211,153,0.3)" : "var(--border)"}`,
                       display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: "12px", fontWeight: 700, color: u.hadir ? "var(--emerald)" : "var(--text-muted)",
+                      fontSize: "12px", fontWeight: 700, color: hadir ? "var(--emerald)" : "var(--text-muted)",
                     }}>
                       {(u.displayName || "?")[0].toUpperCase()}
                     </div>
@@ -275,21 +327,22 @@ export default function AdminDashboard({ user, activeSection }) {
                       <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {u.displayName || "Pengguna"}
                       </div>
-                      <div style={{ fontSize: "10px", color: u.hadir ? "var(--emerald)" : "var(--text-muted)" }}>
-                        {u.hadir ? "✓ Hadir" : "Belum hadir"}
+                      <div style={{ fontSize: "10px", color: hadir ? "var(--emerald)" : "var(--text-muted)" }}>
+                        {hadir ? "✓ Hadir" : "Belum hadir"}
                       </div>
                     </div>
-                    <button onClick={() => handleToggleAttend(u, u.hadir)}
+                    <button onClick={() => handleToggleAttend(u, hadir)}
                       style={{
                         padding: "4px 8px", fontSize: "10px", fontWeight: 700,
                         borderRadius: "6px", border: "none", cursor: "pointer",
-                        background: u.hadir ? "rgba(248,113,113,0.12)" : "rgba(52,211,153,0.12)",
-                        color: u.hadir ? "var(--red)" : "var(--emerald)",
+                        background: hadir ? "rgba(248,113,113,0.12)" : "rgba(52,211,153,0.12)",
+                        color: hadir ? "var(--red)" : "var(--emerald)",
                       }}>
-                      {u.hadir ? "Tolak" : "Set Hadir"}
+                      {hadir ? "Tolak" : "Set Hadir"}
                     </button>
                   </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -329,8 +382,8 @@ export default function AdminDashboard({ user, activeSection }) {
                     </td>
                     <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-muted)" }}>{u.email || "-"}</td>
                     <td style={{ padding: "10px 14px" }}>
-                      <span className={`badge ${u.hadir ? "badge-emerald" : "badge-red"}`}>
-                        {u.hadir ? "✓ Hadir" : "Belum Absen"}
+                      <span className={`badge ${isPresentInSession(u, session) ? "badge-emerald" : "badge-red"}`}>
+                        {isPresentInSession(u, session) ? "✓ Hadir" : "Belum Absen"}
                       </span>
                     </td>
                     <td style={{ padding: "10px 14px" }}>
@@ -354,8 +407,8 @@ export default function AdminDashboard({ user, activeSection }) {
                       </select>
                     </td>
                     <td style={{ padding: "10px 14px" }}>
-                      <button onClick={() => handleToggleAttend(u, u.hadir)} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
-                        {u.hadir ? "Tolak Absen" : "Set Hadir"}
+                      <button onClick={() => handleToggleAttend(u, isPresentInSession(u, session))} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
+                        {isPresentInSession(u, session) ? "Tolak Absen" : "Set Hadir"}
                       </button>
                     </td>
                   </tr>
