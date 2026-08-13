@@ -2,6 +2,10 @@ import React, { useState, useEffect, useRef } from "react";
 import { rtdb } from "../firebase";
 import { ref, onValue, set, update } from "firebase/database";
 import QRCode from "qrcode";
+import {
+  buildAttendanceRows, buildRecap, exportAttendanceToExcel,
+  monthLabel, recordTeacherAttendance, sourceLabel, toDateKey,
+} from "../utils/attendance";
 
 // ─── QR Canvas ────────────────────────────────────────────────
 function QRCanvas({ value }) {
@@ -35,6 +39,13 @@ export default function AdminDashboard({ user, activeSection }) {
   // Users from RTDB
   const [allUsers, setAllUsers] = useState([]);
   const [usersLoading, setUsersLoading] = useState(true);
+
+  // Teacher attendance log (kept outside the user node)
+  const [teacherAttendance, setTeacherAttendance] = useState({});
+  const [monthFilter, setMonthFilter] = useState("all");
+  const [teacherFilter, setTeacherFilter] = useState("all");
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
 
   // Material upload
   const [matTitle, setMatTitle] = useState("");
@@ -100,6 +111,13 @@ export default function AdminDashboard({ user, activeSection }) {
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    const unsub = onValue(ref(rtdb, "teacherAttendance"), (snap) => {
+      setTeacherAttendance(snap.exists() ? snap.val() : {});
+    });
+    return () => unsub();
+  }, []);
+
   const handleRoleChange = async (uid, newRole) => {
     try {
       await update(ref(rtdb, `users/${uid}`), { role: newRole });
@@ -109,6 +127,16 @@ export default function AdminDashboard({ user, activeSection }) {
   const handleToggleAttend = async (uid, currentHadir) => {
     try {
       await update(ref(rtdb, `users/${uid}`), { hadir: !currentHadir });
+    } catch (e) { console.error(e); }
+  };
+
+  // Manual check-in still produces a payroll log entry.
+  const handleMarkTeacherPresent = async (teacher) => {
+    try {
+      await recordTeacherAttendance(
+        { uid: teacher.id, displayName: teacher.displayName, email: teacher.email },
+        { source: "manual-admin" },
+      );
     } catch (e) { console.error(e); }
   };
 
@@ -335,63 +363,186 @@ export default function AdminDashboard({ user, activeSection }) {
 
   // ── Teacher Attendance Section ──────────────────────────────
   if (activeSection === "teacher_attendance") {
-    const teachers = allUsers.filter(u => u.role === "guru");
+    const attendanceRows = buildAttendanceRows(teacherAttendance, allUsers);
+
+    const months = [...new Set(attendanceRows.map(r => r.date.slice(0, 7)))].sort().reverse();
+    const teacherOptions = [...new Map(attendanceRows.map(r => [r.uid, r.displayName])).entries()];
+
+    const filteredRows = attendanceRows.filter(r =>
+      (monthFilter === "all" || r.date.startsWith(monthFilter)) &&
+      (teacherFilter === "all" || r.uid === teacherFilter)
+    );
+    const recap = buildRecap(filteredRows);
+    const todayStr = toDateKey(new Date());
+    const presentToday = new Set(filteredRows.filter(r => r.date === todayStr).map(r => r.uid));
+
+    const handleExport = async () => {
+      setExporting(true); setExportError("");
+      try {
+        const scope = monthFilter === "all" ? "semua-bulan" : monthFilter;
+        await exportAttendanceToExcel(filteredRows, `absensi-guru-${scope}.xlsx`);
+      } catch (e) {
+        console.error(e);
+        setExportError("Gagal membuat file Excel. Coba lagi.");
+      }
+      setExporting(false);
+    };
+
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-        <h3 style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>Daftar Kehadiran Guru (Penggajian)</h3>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+          <div>
+            <h3 style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>Daftar Kehadiran Guru (Penggajian)</h3>
+            <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
+              Log kehadiran tersimpan permanen dan tetap ada meskipun role guru diubah.
+            </p>
+          </div>
+          <button onClick={handleExport} disabled={exporting || filteredRows.length === 0} className="btn-primary"
+            style={{ padding: "10px 16px", fontSize: "12px", whiteSpace: "nowrap" }}>
+            {exporting ? "Menyiapkan..." : `⬇ Unduh Excel (${filteredRows.length} data)`}
+          </button>
+        </div>
 
-        <div className="animated-card" style={{
-          background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", overflowX: "auto",
-        }}>
-          {usersLoading ? (
-            <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Memuat data database...</div>
-          ) : teachers.length === 0 ? (
-            <div style={{ padding: "32px", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>
-              Belum ada guru yang terdaftar di database.
+        {exportError && (
+          <div style={{ padding: "10px 12px", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: "10px", color: "var(--red)", fontSize: "12px" }}>
+            {exportError}
+          </div>
+        )}
+
+        <div className="responsive-grid-3">
+          {[
+            { label: "Total Data Kehadiran", value: filteredRows.length, color: "var(--purple)" },
+            { label: "Guru Tercatat", value: recap.length, color: "var(--cyan)" },
+            { label: "Hadir Hari Ini", value: presentToday.size, color: "var(--emerald)" },
+          ].map((s, i) => (
+            <div key={i} className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", padding: "16px 18px" }}>
+              <div style={{ fontSize: "24px", fontWeight: 800, color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", marginTop: "2px" }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <div>
+            <label style={{ fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>Bulan</label>
+            <select value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
+              <option value="all">Semua Bulan</option>
+              {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>Guru</label>
+            <select value={teacherFilter} onChange={(e) => setTeacherFilter(e.target.value)}>
+              <option value="all">Semua Guru</option>
+              {teacherOptions.map(([uid, name]) => <option key={uid} value={uid}>{name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-primary)" }}>Rekap per Guru</h4>
+        <div className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", overflowX: "auto" }}>
+          {recap.length === 0 ? (
+            <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>
+              Belum ada kehadiran guru yang tercatat.
             </div>
           ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "550px" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "560px" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["#", "Nama Guru", "Email", "Status Hari Ini", "Waktu Absen Hari Ini", "Riwayat Kehadiran", "Aksi"].map((h) => (
+                  {["#", "Nama Guru", "Email", "Total Hari Hadir", "Kehadiran Terakhir", "Role Saat Ini"].map((h) => (
                     <th key={h} style={{ padding: "10px 14px", textAlign: "left", fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {teachers.map((t, i) => {
-                  const todayStr = new Date().toISOString().split('T')[0];
-                  const todayAttendance = t.history ? t.history[todayStr] : null;
+                {recap.map((r, i) => (
+                  <tr key={r.uid} className="tr-hover" style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "10px 14px", fontSize: "11px", color: "var(--text-muted)" }}>{i + 1}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>{r.displayName}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-muted)" }}>{r.email}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "13px", fontWeight: 700, color: "var(--emerald)" }}>{r.total} hari</td>
+                    <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-secondary)" }}>{r.lastDate}</td>
+                    <td style={{ padding: "10px 14px" }}>
+                      <span className={`badge ${r.currentRole === "guru" ? "badge-cyan" : "badge-red"}`}>{r.currentRole}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-primary)" }}>Detail Kehadiran</h4>
+        <div className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", overflowX: "auto" }}>
+          {filteredRows.length === 0 ? (
+            <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>
+              Tidak ada data kehadiran untuk filter ini.
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "640px" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["#", "Nama Guru", "Email", "Hari", "Tanggal", "Jam Masuk", "Sumber"].map((h) => (
+                    <th key={h} style={{ padding: "10px 14px", textAlign: "left", fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRows.map((r, i) => (
+                  <tr key={`${r.uid}-${r.date}`} className="tr-hover" style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "10px 14px", fontSize: "11px", color: "var(--text-muted)" }}>{i + 1}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>{r.displayName}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-muted)" }}>{r.email}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-secondary)" }}>{r.day}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-secondary)" }}>{r.date}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "12px", fontWeight: 700, color: "var(--cyan)" }}>{r.time}</td>
+                    <td style={{ padding: "10px 14px", fontSize: "11px", color: "var(--text-muted)" }}>{sourceLabel(r.source)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <h4 style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-primary)" }}>Status Guru Hari Ini</h4>
+        <div className="animated-card" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "16px", overflowX: "auto" }}>
+          {usersLoading ? (
+            <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Memuat data database...</div>
+          ) : allUsers.filter(u => u.role === "guru").length === 0 ? (
+            <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>
+              Belum ada guru yang terdaftar di database.
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "520px" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["#", "Nama Guru", "Email", "Status Hari Ini", "Jam Masuk", "Aksi"].map((h) => (
+                    <th key={h} style={{ padding: "10px 14px", textAlign: "left", fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {allUsers.filter(u => u.role === "guru").map((t, i) => {
+                  const todayEntry = teacherAttendance?.[t.id]?.[todayStr];
                   return (
                     <tr key={t.id} className="tr-hover" style={{ borderBottom: "1px solid var(--border)" }}>
                       <td style={{ padding: "10px 14px", fontSize: "11px", color: "var(--text-muted)" }}>{i + 1}</td>
                       <td style={{ padding: "10px 14px", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>{t.displayName || "Guru"}</td>
                       <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-muted)" }}>{t.email || "-"}</td>
                       <td style={{ padding: "10px 14px" }}>
-                        <span className={`badge ${t.hadir ? "badge-emerald" : "badge-red"}`}>
-                          {t.hadir ? "✓ Hadir" : "Belum Absen"}
+                        <span className={`badge ${todayEntry ? "badge-emerald" : "badge-red"}`}>
+                          {todayEntry ? "✓ Hadir" : "Belum Absen"}
                         </span>
                       </td>
-                      <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-primary)" }}>
-                        {todayAttendance ? todayAttendance.time : "-"}
-                      </td>
+                      <td style={{ padding: "10px 14px", fontSize: "12px", color: "var(--text-primary)" }}>{todayEntry ? todayEntry.time : "-"}</td>
                       <td style={{ padding: "10px 14px" }}>
-                        <div style={{ display: "flex", flexDirection: "column", gap: "4px", maxHeight: "100px", overflowY: "auto" }}>
-                          {!t.history || Object.keys(t.history).length === 0 ? (
-                            <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Tidak ada riwayat</span>
-                          ) : (
-                            Object.values(t.history).sort((a,b) => b.timestamp - a.timestamp).map((h, idx) => (
-                              <div key={idx} style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
-                                📅 {h.date} - <span style={{ color: "var(--cyan)", fontWeight: 600 }}>{h.time}</span>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </td>
-                      <td style={{ padding: "10px 14px" }}>
-                        <button onClick={() => handleToggleAttend(t.id, t.hadir)} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
-                          {t.hadir ? "Tolak Absen" : "Set Hadir"}
-                        </button>
+                        {todayEntry ? (
+                          <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>Tercatat</span>
+                        ) : (
+                          <button onClick={() => handleMarkTeacherPresent(t)} className="btn-ghost" style={{ padding: "4px 10px", fontSize: "11px" }}>
+                            Set Hadir
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
