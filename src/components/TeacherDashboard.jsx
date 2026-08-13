@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { rtdb } from "../firebase";
 import { ref, onValue, set, update, get } from "firebase/database";
 import { Html5Qrcode } from "html5-qrcode";
+import { recordTeacherAttendance, toDateKey } from "../utils/attendance";
 
 // ─── Real QR Scanner Panel (Teacher) ──────────────────────────
 function QRScanPanel({ user, onSuccess }) {
@@ -45,19 +46,7 @@ function QRScanPanel({ user, onSuccess }) {
         return;
       }
 
-      const userRef = ref(rtdb, `users/${user.uid}`);
-      await update(userRef, {
-        hadir: true,
-        lastAttendanceTime: Date.now(),
-      });
-
-      const dateStr = new Date().toISOString().split('T')[0];
-      const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-      await set(ref(rtdb, `users/${user.uid}/history/${dateStr}`), {
-        date: dateStr,
-        time: timeStr,
-        timestamp: Date.now()
-      });
+      await recordTeacherAttendance(user);
 
       setSuccess(true);
       if (onSuccess) onSuccess();
@@ -449,7 +438,7 @@ export default function TeacherDashboard({ user, activeSection, onNavigate }) {
               </thead>
               <tbody>
                 {students.map((u, i) => {
-                  const todayStr = new Date().toISOString().split('T')[0];
+                  const todayStr = toDateKey(new Date());
                   const todayAtt = u.history ? u.history[todayStr] : null;
                   return (
                     <tr key={u.id} className="tr-hover" style={{ borderBottom: "1px solid var(--border)" }}>

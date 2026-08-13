@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { rtdb } from "../firebase";
 import { ref, onValue, set, get, update } from "firebase/database";
 import { Html5Qrcode } from "html5-qrcode";
+import { toDateKey, toTimeString } from "../utils/attendance";
 
 // ─── Real QR Scanner Panel ────────────────────────────────────
 function QRScanPanel({ user, onSuccess }) {
@@ -54,8 +55,8 @@ function QRScanPanel({ user, onSuccess }) {
         lastAttendanceTime: Date.now(),
       });
 
-      const dateStr = new Date().toISOString().split('T')[0];
-      const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+      const dateStr = toDateKey(new Date());
+      const timeStr = toTimeString(new Date());
       await set(ref(rtdb, `users/${user.uid}/history/${dateStr}`), {
         date: dateStr,
         time: timeStr,

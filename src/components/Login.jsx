@@ -4,6 +4,11 @@ import { signInWithPopup, signInWithRedirect, signInWithEmailAndPassword, create
 import ReCAPTCHA from "react-google-recaptcha";
 import logoMan11 from "../bahan/logo-man11.png";
 
+// Public reCAPTCHA v2 site key for man-11-robotic. The matching secret key must
+// stay server-side and is never referenced here.
+const RECAPTCHA_SITE_KEY =
+  import.meta.env.VITE_RECAPTCHA_SITE_KEY || "6LdwNYMtAAAAAJi77OH8jT7AfTwZ1w8kq-wobpun";
+
 export default function Login({ onAuthSuccess, onRoleMock }) {
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [email, setEmail] = useState("");
@@ -193,7 +198,7 @@ export default function Login({ onAuthSuccess, onRoleMock }) {
           {/* Real Google reCAPTCHA v2 */}
           <div style={{ display: "flex", justifyContent: "center", margin: "8px 0" }}>
             <ReCAPTCHA
-              sitekey="6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI" // Test sitekey, replace with real one in production
+              sitekey={RECAPTCHA_SITE_KEY}
               onChange={(value) => setIsRecaptchaVerified(!!value)}
               theme="dark"
             />
