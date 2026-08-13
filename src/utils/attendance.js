@@ -130,38 +130,43 @@ export function buildRecap(rows) {
   return [...byTeacher.values()].sort((a, b) => b.total - a.total);
 }
 
+const header = (text) => ({ value: text, fontWeight: "bold", backgroundColor: "#EEEEEE", align: "center" });
+
+export function attendanceColumns() {
+  return [
+    { header: header("No"), cell: (_, i) => ({ value: i + 1, type: Number }), width: 6 },
+    { header: header("Nama Guru"), cell: (r) => ({ value: r.displayName }), width: 26 },
+    { header: header("Email"), cell: (r) => ({ value: r.email }), width: 30 },
+    { header: header("Hari"), cell: (r) => ({ value: r.day }), width: 12 },
+    { header: header("Tanggal"), cell: (r) => ({ value: r.date }), width: 14 },
+    { header: header("Jam Masuk"), cell: (r) => ({ value: r.time }), width: 12 },
+    { header: header("Bulan"), cell: (r) => ({ value: monthLabel(r.date.slice(0, 7)) }), width: 18 },
+    { header: header("Sumber"), cell: (r) => ({ value: sourceLabel(r.source) }), width: 16 },
+    { header: header("Role Saat Ini"), cell: (r) => ({ value: r.currentRole }), width: 14 },
+  ];
+}
+
+export function recapColumns() {
+  return [
+    { header: header("No"), cell: (_, i) => ({ value: i + 1, type: Number }), width: 6 },
+    { header: header("Nama Guru"), cell: (r) => ({ value: r.displayName }), width: 26 },
+    { header: header("Email"), cell: (r) => ({ value: r.email }), width: 30 },
+    { header: header("Total Hari Hadir"), cell: (r) => ({ value: r.total, type: Number }), width: 18 },
+    { header: header("Kehadiran Pertama"), cell: (r) => ({ value: r.firstDate }), width: 20 },
+    { header: header("Kehadiran Terakhir"), cell: (r) => ({ value: r.lastDate }), width: 20 },
+    { header: header("Role Saat Ini"), cell: (r) => ({ value: r.currentRole }), width: 14 },
+  ];
+}
+
 export async function exportAttendanceToExcel(rows, fileName) {
-  const { default: writeXlsxFile } = await import("write-excel-file/browser");
+  const { default: writeXlsxFile, getSheetData } = await import("write-excel-file/browser");
 
-  const detail = rows.map((r, i) => ({ ...r, no: i + 1 }));
-  const recap = buildRecap(rows).map((r, i) => ({ ...r, no: i + 1 }));
+  const recap = buildRecap(rows);
+  const recapCols = recapColumns();
+  const detailCols = attendanceColumns();
 
-  const detailSchema = [
-    { column: "No", type: Number, value: (r) => r.no, width: 6 },
-    { column: "Nama Guru", type: String, value: (r) => r.displayName, width: 26 },
-    { column: "Email", type: String, value: (r) => r.email, width: 30 },
-    { column: "Hari", type: String, value: (r) => r.day, width: 12 },
-    { column: "Tanggal", type: String, value: (r) => r.date, width: 14 },
-    { column: "Jam Masuk", type: String, value: (r) => r.time, width: 12 },
-    { column: "Bulan", type: String, value: (r) => monthLabel(r.date.slice(0, 7)), width: 18 },
-    { column: "Sumber", type: String, value: (r) => sourceLabel(r.source), width: 16 },
-    { column: "Role Saat Ini", type: String, value: (r) => r.currentRole, width: 14 },
-  ];
-
-  const recapSchema = [
-    { column: "No", type: Number, value: (r) => r.no, width: 6 },
-    { column: "Nama Guru", type: String, value: (r) => r.displayName, width: 26 },
-    { column: "Email", type: String, value: (r) => r.email, width: 30 },
-    { column: "Total Hari Hadir", type: Number, value: (r) => r.total, width: 18 },
-    { column: "Kehadiran Pertama", type: String, value: (r) => r.firstDate, width: 20 },
-    { column: "Kehadiran Terakhir", type: String, value: (r) => r.lastDate, width: 20 },
-    { column: "Role Saat Ini", type: String, value: (r) => r.currentRole, width: 14 },
-  ];
-
-  await writeXlsxFile([recap, detail], {
-    schema: [recapSchema, detailSchema],
-    sheets: ["Rekap Penggajian", "Detail Kehadiran"],
-    fileName,
-    headerStyle: { fontWeight: "bold", backgroundColor: "#EEEEEE", align: "center" },
-  });
+  await writeXlsxFile([
+    { data: getSheetData(recap, recapCols), columns: recapCols, sheet: "Rekap Penggajian", stickyRowsCount: 1 },
+    { data: getSheetData(rows, detailCols), columns: detailCols, sheet: "Detail Kehadiran", stickyRowsCount: 1 },
+  ]).toFile(fileName);
 }
