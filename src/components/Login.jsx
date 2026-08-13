@@ -1,34 +1,35 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { auth, googleProvider } from "../firebase";
 import { signInWithPopup, signInWithRedirect, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendEmailVerification } from "firebase/auth";
-import ReCAPTCHA from "react-google-recaptcha";
+import { getRecaptchaToken, loadRecaptcha } from "../utils/recaptcha";
 import logoMan11 from "../bahan/logo-man11.png";
-
-// Public reCAPTCHA v2 site key for man-11-robotic. The matching secret key must
-// stay server-side and is never referenced here.
-const RECAPTCHA_SITE_KEY =
-  import.meta.env.VITE_RECAPTCHA_SITE_KEY || "6LdwNYMtAAAAAJi77OH8jT7AfTwZ1w8kq-wobpun";
 
 export default function Login({ onAuthSuccess, onRoleMock }) {
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [isRecaptchaVerified, setIsRecaptchaVerified] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const validateRecaptcha = () => {
-    if (!isRecaptchaVerified) {
-      setError("Silakan centang reCAPTCHA 'Saya bukan bot' terlebih dahulu.");
+  useEffect(() => {
+    loadRecaptcha().catch((err) => console.warn("reCAPTCHA load failed:", err));
+  }, []);
+
+  const verifyHuman = async (action) => {
+    try {
+      await getRecaptchaToken(action);
+      return true;
+    } catch (err) {
+      console.warn("reCAPTCHA error:", err);
+      setError("Verifikasi reCAPTCHA gagal. Periksa koneksi lalu coba lagi.");
       return false;
     }
-    return true;
   };
 
   const handleGoogleLogin = async () => {
-    if (!validateRecaptcha()) return;
     setLoading(true); setError("");
+    if (!(await verifyHuman("login_google"))) { setLoading(false); return; }
     try {
       // Try popup first, fallback to redirect if popup blocked
       const result = await signInWithPopup(auth, googleProvider);
@@ -45,7 +46,6 @@ export default function Login({ onAuthSuccess, onRoleMock }) {
 
   const handleSubmitEmail = async (e) => {
     e.preventDefault();
-    if (!validateRecaptcha()) return;
 
     if (isRegisterMode) {
       if (password.length < 6) {
@@ -59,6 +59,10 @@ export default function Login({ onAuthSuccess, onRoleMock }) {
     }
 
     setLoading(true); setError("");
+
+    if (!(await verifyHuman(isRegisterMode ? "register_email" : "login_email"))) {
+      setLoading(false); return;
+    }
 
     // Admin bypass seed check
     if (!isRegisterMode && email === "admin@roboticman11.org" && password === "RoboticAdmin2026!") {
@@ -195,14 +199,13 @@ export default function Login({ onAuthSuccess, onRoleMock }) {
             </div>
           )}
 
-          {/* Real Google reCAPTCHA v2 */}
-          <div style={{ display: "flex", justifyContent: "center", margin: "8px 0" }}>
-            <ReCAPTCHA
-              sitekey={RECAPTCHA_SITE_KEY}
-              onChange={(value) => setIsRecaptchaVerified(!!value)}
-              theme="dark"
-            />
-          </div>
+          {/* Google reCAPTCHA v3 runs invisibly on submit */}
+          <p style={{ fontSize: "10px", color: "var(--text-muted)", textAlign: "center", margin: "4px 0" }}>
+            Dilindungi reCAPTCHA — berlaku{" "}
+            <a href="https://policies.google.com/privacy" target="_blank" rel="noreferrer" style={{ color: "var(--purple-light)" }}>Privasi</a>{" "}
+            &amp;{" "}
+            <a href="https://policies.google.com/terms" target="_blank" rel="noreferrer" style={{ color: "var(--purple-light)" }}>Ketentuan</a> Google.
+          </p>
 
           <button type="submit" disabled={loading} className="btn-primary"
             style={{ padding: "12px", fontSize: "14px", marginTop: "4px" }}>
