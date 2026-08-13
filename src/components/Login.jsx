@@ -7,7 +7,7 @@ import logoMan11 from "../bahan/logo-man11.png";
 // Public reCAPTCHA v2 site key for man-11-robotic. The matching secret key must
 // stay server-side and is never referenced here.
 const RECAPTCHA_SITE_KEY =
-  import.meta.env.VITE_RECAPTCHA_SITE_KEY || "6LdwNYMtAAAAAJi77OH8jT7AfTwZ1w8kq-wobpun";
+  import.meta.env.VITE_RECAPTCHA_SITE_KEY || "6LdwNYMtAAAAAI_oIxuXABzJu5E9iqc0XcBBTrfh";
 
 export default function Login({ onAuthSuccess, onRoleMock }) {
   const [isRegisterMode, setIsRegisterMode] = useState(false);
